@@ -1,19 +1,19 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, date
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Laporan Absensi", layout="wide")
 st.title("🕒 Konversi Absensi ke Laporan Harian")
-st.caption("Upload Excel absensi mentah → otomatis jadi laporan Nama, Tanggal, Jam Masuk, Jam Pulang, Status, Menit Terlambat.")
+st.caption("Upload Excel absensi → input rentang tanggal → otomatis jadi laporan lengkap.")
 
 
 # === ATURAN ===
 JAM_MASUK_NORMAL = time(9, 0, 59)     # ≤ 09:00:59 = tepat waktu
 BATAS_HALFDAY = time(13, 0)           # pulang ≤ 13:00 = half-day (khusus Sabtu)
-HARI_LIBUR = [6]                      # hanya Minggu
+HARI_LIBUR = [6]                      # hanya Minggu (0=Senin, 6=Minggu)
 
 
 def parse_datetime(s):
@@ -23,7 +23,8 @@ def parse_datetime(s):
         return s
     s = str(s).strip()
     for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
-                "%d-%m-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S"):
+                "%d-%m-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
+                "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M"):
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
@@ -38,7 +39,6 @@ def jam_str(t):
 
 
 def hitung_menit_terlambat(jam_masuk):
-    """Menit terlambat dihitung dari 09:00:59."""
     if jam_masuk is None:
         return 0
     batas = datetime.combine(datetime.today(), JAM_MASUK_NORMAL)
@@ -47,7 +47,8 @@ def hitung_menit_terlambat(jam_masuk):
     return max(0, int(selisih))
 
 
-def konversi_absensi(df_raw):
+def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
+    """Generate laporan lengkap: Nama × Tanggal dalam rentang."""
     col_nama = None
     col_waktu = None
     for c in df_raw.columns:
@@ -70,60 +71,91 @@ def konversi_absensi(df_raw):
     df["Jam"] = df["TglWaktu"].dt.time
     df["Hari"] = df["TglWaktu"].dt.weekday
 
+    # Ambil semua nama unik
+    semua_nama = sorted(df["Nama"].unique().tolist())
+
+    # Generate semua tanggal dalam rentang
+    semua_tanggal = []
+    tgl = tgl_mulai
+    while tgl <= tgl_selesai:
+        semua_tanggal.append(tgl)
+        tgl += timedelta(days=1)
+
     hasil = []
-    for (nama, tanggal), group in df.groupby(["Nama", "Tanggal"]):
-        hari = group["Hari"].iloc[0]
-        jam_list = sorted(group["Jam"].tolist())
+    for nama in semua_nama:
+        df_nama = df[df["Nama"] == nama]
 
-        # Jam masuk = scan PERTAMA sebelum 12:00
-        jam_masuk = None
-        for j in jam_list:
-            if j < time(12, 0):
-                jam_masuk = j
-                break
+        for tanggal in semua_tanggal:
+            df_hari = df_nama[df_nama["Tanggal"] == tanggal]
+            hari = tanggal.weekday()  # 0=Senin, 6=Minggu
 
-        # Jam pulang = scan PERTAMA setelah 12:00 (bukan terakhir)
-        jam_pulang = None
-        for j in jam_list:
-            if j >= time(12, 0):
-                jam_pulang = j
-                break
+            # Kalau tidak ada scan
+            if df_hari.empty:
+                if hari in HARI_LIBUR:
+                    status = "Libur"
+                else:
+                    status = "Tidak Ada Absen"
+                hasil.append({
+                    "Nama": nama,
+                    "Tanggal": tanggal.strftime("%d/%m/%Y"),
+                    "Jam Masuk": "",
+                    "Jam Pulang": "",
+                    "Status": status,
+                    "Menit Terlambat": 0,
+                })
+                continue
 
-        # === TENTUKAN STATUS ===
-        if hari in HARI_LIBUR:
-            status = "Libur"
-            menit_terlambat = 0
-        elif jam_masuk is None and jam_pulang is None:
-            status = "Tanpa Keterangan"
-            menit_terlambat = 0
-        elif jam_masuk is not None and jam_pulang is None:
-            if jam_masuk > JAM_MASUK_NORMAL:
+            jam_list = sorted(df_hari["Jam"].tolist())
+
+            # Jam masuk = scan PERTAMA sebelum 12:00
+            jam_masuk = None
+            for j in jam_list:
+                if j < time(12, 0):
+                    jam_masuk = j
+                    break
+
+            # Jam pulang = scan PERTAMA setelah 12:00
+            jam_pulang = None
+            for j in jam_list:
+                if j >= time(12, 0):
+                    jam_pulang = j
+                    break
+
+            # Tentukan status
+            if hari in HARI_LIBUR:
+                status = "Libur"
+                menit_terlambat = 0
+            elif jam_masuk is None and jam_pulang is None:
+                status = "Tidak Ada Absen"
+                menit_terlambat = 0
+            elif jam_masuk is not None and jam_pulang is None:
+                if jam_masuk > JAM_MASUK_NORMAL:
+                    status = "Terlambat"
+                    menit_terlambat = hitung_menit_terlambat(jam_masuk)
+                else:
+                    status = "Hanya Absen Masuk"
+                    menit_terlambat = 0
+            elif jam_masuk is None and jam_pulang is not None:
+                status = "Hanya Absen Pulang"
+                menit_terlambat = 0
+            elif hari == 5 and jam_pulang <= BATAS_HALFDAY:  # Sabtu
+                status = "Half-day"
+                menit_terlambat = 0
+            elif jam_masuk > JAM_MASUK_NORMAL:
                 status = "Terlambat"
                 menit_terlambat = hitung_menit_terlambat(jam_masuk)
             else:
-                status = "Hanya Absen Masuk"
+                status = "Tepat Waktu"
                 menit_terlambat = 0
-        elif jam_masuk is None and jam_pulang is not None:
-            status = "Hanya Absen Pulang"
-            menit_terlambat = 0
-        elif hari == 5 and jam_pulang <= BATAS_HALFDAY:  # Sabtu
-            status = "Half-day"
-            menit_terlambat = 0
-        elif jam_masuk > JAM_MASUK_NORMAL:
-            status = "Terlambat"
-            menit_terlambat = hitung_menit_terlambat(jam_masuk)
-        else:
-            status = "Tepat Waktu"
-            menit_terlambat = 0
 
-        hasil.append({
-            "Nama": nama,
-            "Tanggal": tanggal.strftime("%d/%m/%Y"),
-            "Jam Masuk": jam_str(jam_masuk),
-            "Jam Pulang": jam_str(jam_pulang),
-            "Status": status,
-            "Menit Terlambat": menit_terlambat,
-        })
+            hasil.append({
+                "Nama": nama,
+                "Tanggal": tanggal.strftime("%d/%m/%Y"),
+                "Jam Masuk": jam_str(jam_masuk),
+                "Jam Pulang": jam_str(jam_pulang),
+                "Status": status,
+                "Menit Terlambat": menit_terlambat,
+            })
 
     df_hasil = pd.DataFrame(hasil)
     if not df_hasil.empty:
@@ -159,21 +191,22 @@ def tulis_df(writer, df, sheet, startrow=0, kolom_angka=None):
         ws.column_dimensions[letter].width = min(max_len + 2, 30)
 
 
+# =========================================================
+# UI
+# =========================================================
 uploaded = st.file_uploader("Upload file Excel absensi (.xls / .xlsx)", type=["xls", "xlsx"])
 
 if uploaded:
-    # === BACA FILE DENGAN MULTI-ENGINE ===
+    # === BACA FILE MULTI-ENGINE ===
     df_raw = None
     errors = []
 
-    # Coba xlrd dulu (untuk .xls format lama)
     try:
         uploaded.seek(0)
         df_raw = pd.read_excel(uploaded, header=0, engine="xlrd")
     except Exception as e:
         errors.append(f"xlrd: {e}")
 
-    # Kalau gagal, coba openpyxl (untuk .xlsx)
     if df_raw is None:
         try:
             uploaded.seek(0)
@@ -181,7 +214,6 @@ if uploaded:
         except Exception as e:
             errors.append(f"openpyxl: {e}")
 
-    # Kalau masih gagal, coba default
     if df_raw is None:
         try:
             uploaded.seek(0)
@@ -196,10 +228,23 @@ if uploaded:
         st.stop()
 
     st.markdown("### 📋 Data Mentah")
-    st.dataframe(df_raw.head(20), use_container_width=True)
+    st.dataframe(df_raw.head(10), use_container_width=True)
+
+    # === INPUT RENTANG TANGGAL ===
+    st.markdown("### 📅 Rentang Tanggal Laporan")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        tgl_mulai = st.date_input("Tanggal Mulai", value=date(2026, 9, 1))
+    with c2:
+        tgl_selesai = st.date_input("Tanggal Selesai", value=date(2026, 9, 12))
 
     if st.button("🚀 Konversi ke Laporan", type="primary"):
-        df_hasil = konversi_absensi(df_raw)
+        if tgl_mulai > tgl_selesai:
+            st.error("Tanggal Mulai harus ≤ Tanggal Selesai")
+            st.stop()
+
+        df_hasil = konversi_absensi(df_raw, tgl_mulai, tgl_selesai)
 
         if df_hasil.empty:
             st.warning("Tidak ada data yang bisa dikonversi.")
@@ -210,8 +255,8 @@ if uploaded:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Baris", len(df_hasil))
             c2.metric("Terlambat", (df_hasil["Status"] == "Terlambat").sum())
-            c3.metric("Half-day", (df_hasil["Status"] == "Half-day").sum())
-            c4.metric("Tanpa Keterangan", (df_hasil["Status"] == "Tanpa Keterangan").sum())
+            c3.metric("Tidak Ada Absen", (df_hasil["Status"] == "Tidak Ada Absen").sum())
+            c4.metric("Half-day", (df_hasil["Status"] == "Half-day").sum())
 
             buffer = BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
