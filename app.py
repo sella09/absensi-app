@@ -10,10 +10,10 @@ st.title("🕒 Konversi Absensi ke Laporan Harian")
 st.caption("Upload Excel absensi mentah → otomatis jadi laporan Nama, Tanggal, Jam Masuk, Jam Pulang, Status, Menit Terlambat.")
 
 
-JAM_MASUK_NORMAL = time(8, 30)
-JAM_PULANG_NORMAL = time(16, 0)
-BATAS_HALFDAY = time(13, 0)
-HARI_LIBUR = [5, 6]  # Sabtu, Minggu
+# === ATURAN ===
+JAM_MASUK_NORMAL = time(9, 0, 59)     # ≤ 09:00:59 dianggap tepat waktu
+BATAS_HALFDAY = time(13, 0)           # pulang ≤ 13:00 = half-day (khusus Sabtu)
+HARI_LIBUR = [6]                      # hanya Minggu
 
 
 def parse_datetime(s):
@@ -38,11 +38,12 @@ def jam_str(t):
 
 
 def hitung_menit_terlambat(jam_masuk):
+    """Menit terlambat dihitung dari 09:00:59."""
     if jam_masuk is None:
         return 0
-    normal_dt = datetime.combine(datetime.today(), JAM_MASUK_NORMAL)
+    batas = datetime.combine(datetime.today(), JAM_MASUK_NORMAL)
     masuk_dt = datetime.combine(datetime.today(), jam_masuk)
-    selisih = (masuk_dt - normal_dt).total_seconds() / 60
+    selisih = (masuk_dt - batas).total_seconds() / 60
     return max(0, int(selisih))
 
 
@@ -74,33 +75,44 @@ def konversi_absensi(df_raw):
         hari = group["Hari"].iloc[0]
         jam_list = sorted(group["Jam"].tolist())
 
+        # === ATURAN: kalau scan 2x, ambil yang PERTAMA ===
+        # Jam masuk = scan pertama sebelum 12:00
         jam_masuk = None
         for j in jam_list:
             if j < time(12, 0):
                 jam_masuk = j
                 break
 
+        # Jam pulang = scan pertama setelah 12:00 (bukan terakhir)
         jam_pulang = None
-        for j in reversed(jam_list):
+        for j in jam_list:
             if j >= time(12, 0):
                 jam_pulang = j
                 break
 
+        # === TENTUKAN STATUS ===
         if hari in HARI_LIBUR:
             status = "Libur"
             menit_terlambat = 0
         elif jam_masuk is None and jam_pulang is None:
             status = "Tanpa Keterangan"
             menit_terlambat = 0
-        elif jam_pulang is not None and jam_pulang <= BATAS_HALFDAY:
+        elif jam_masuk is not None and jam_pulang is None:
+            if jam_masuk > JAM_MASUK_NORMAL:
+                status = "Terlambat"
+                menit_terlambat = hitung_menit_terlambat(jam_masuk)
+            else:
+                status = "Hanya Absen Masuk"
+                menit_terlambat = 0
+        elif jam_masuk is None and jam_pulang is not None:
+            status = "Hanya Absen Pulang"
+            menit_terlambat = 0
+        elif hari == 5 and jam_pulang <= BATAS_HALFDAY:  # Sabtu
             status = "Half-day"
             menit_terlambat = 0
-        elif jam_masuk is not None and jam_masuk > JAM_MASUK_NORMAL:
+        elif jam_masuk > JAM_MASUK_NORMAL:
             status = "Terlambat"
             menit_terlambat = hitung_menit_terlambat(jam_masuk)
-        elif jam_masuk is None:
-            status = "Tanpa Keterangan"
-            menit_terlambat = 0
         else:
             status = "Tepat Waktu"
             menit_terlambat = 0
@@ -172,8 +184,8 @@ if uploaded:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Baris", len(df_hasil))
             c2.metric("Terlambat", (df_hasil["Status"] == "Terlambat").sum())
-            c3.metric("Tanpa Keterangan", (df_hasil["Status"] == "Tanpa Keterangan").sum())
-            c4.metric("Half-day", (df_hasil["Status"] == "Half-day").sum())
+            c3.metric("Half-day", (df_hasil["Status"] == "Half-day").sum())
+            c4.metric("Tanpa Keterangan", (df_hasil["Status"] == "Tanpa Keterangan").sum())
 
             buffer = BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
