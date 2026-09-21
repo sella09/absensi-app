@@ -11,7 +11,7 @@ st.caption("Upload Excel absensi mentah → otomatis jadi laporan Nama, Tanggal,
 
 
 # === ATURAN ===
-JAM_MASUK_NORMAL = time(9, 0, 59)     # ≤ 09:00:59 dianggap tepat waktu
+JAM_MASUK_NORMAL = time(9, 0, 59)     # ≤ 09:00:59 = tepat waktu
 BATAS_HALFDAY = time(13, 0)           # pulang ≤ 13:00 = half-day (khusus Sabtu)
 HARI_LIBUR = [6]                      # hanya Minggu
 
@@ -75,15 +75,14 @@ def konversi_absensi(df_raw):
         hari = group["Hari"].iloc[0]
         jam_list = sorted(group["Jam"].tolist())
 
-        # === ATURAN: kalau scan 2x, ambil yang PERTAMA ===
-        # Jam masuk = scan pertama sebelum 12:00
+        # Jam masuk = scan PERTAMA sebelum 12:00
         jam_masuk = None
         for j in jam_list:
             if j < time(12, 0):
                 jam_masuk = j
                 break
 
-        # Jam pulang = scan pertama setelah 12:00 (bukan terakhir)
+        # Jam pulang = scan PERTAMA setelah 12:00 (bukan terakhir)
         jam_pulang = None
         for j in jam_list:
             if j >= time(12, 0):
@@ -163,10 +162,37 @@ def tulis_df(writer, df, sheet, startrow=0, kolom_angka=None):
 uploaded = st.file_uploader("Upload file Excel absensi (.xls / .xlsx)", type=["xls", "xlsx"])
 
 if uploaded:
+    # === BACA FILE DENGAN MULTI-ENGINE ===
+    df_raw = None
+    errors = []
+
+    # Coba xlrd dulu (untuk .xls format lama)
     try:
-        df_raw = pd.read_excel(uploaded, header=0)
+        uploaded.seek(0)
+        df_raw = pd.read_excel(uploaded, header=0, engine="xlrd")
     except Exception as e:
-        st.error(f"Gagal baca file: {e}")
+        errors.append(f"xlrd: {e}")
+
+    # Kalau gagal, coba openpyxl (untuk .xlsx)
+    if df_raw is None:
+        try:
+            uploaded.seek(0)
+            df_raw = pd.read_excel(uploaded, header=0, engine="openpyxl")
+        except Exception as e:
+            errors.append(f"openpyxl: {e}")
+
+    # Kalau masih gagal, coba default
+    if df_raw is None:
+        try:
+            uploaded.seek(0)
+            df_raw = pd.read_excel(uploaded, header=0)
+        except Exception as e:
+            errors.append(f"default: {e}")
+
+    if df_raw is None:
+        st.error("Gagal baca file. Detail error:")
+        for err in errors:
+            st.code(err)
         st.stop()
 
     st.markdown("### 📋 Data Mentah")
