@@ -17,19 +17,39 @@ HARI_LIBUR = [6]                      # hanya Minggu
 
 
 def parse_datetime(s):
-    if pd.isna(s):
+    if s is None:
         return None
+    try:
+        if pd.isna(s):
+            return None
+    except Exception:
+        pass
     if isinstance(s, datetime):
         return s
+    if isinstance(s, pd.Timestamp):
+        return s.to_pydatetime()
+    if isinstance(s, date):
+        return datetime.combine(s, time(0, 0, 0))
+
     s = str(s).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S",
-                "%d-%m-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
-                "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M"):
+    if s == "" or s.lower() == "nat":
+        return None
+
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%d-%m-%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M",
+        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M",
+        "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d",
+    ):
         try:
             return datetime.strptime(s, fmt)
-        except ValueError:
+        except (ValueError, TypeError):
             continue
-    return None
+
+    try:
+        return pd.to_datetime(s, dayfirst=True, errors="raise").to_pydatetime()
+    except Exception:
+        return None
 
 
 def jam_str(t):
@@ -65,20 +85,35 @@ def cari_kolom(df, kandidat):
 def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
     """Generate laporan lengkap: Nama × Tanggal dalam rentang."""
 
-    # Deteksi kolom: coba tiap kandidat sesuai prioritas
     col_nama = cari_kolom(df_raw, ["name", "nama"])
     col_waktu = cari_kolom(df_raw, ["date/time", "datetime", "tgl/waktu", "tanggal", "waktu"])
 
     if col_nama is None or col_waktu is None:
-        st.error(f"Kolom Nama/Tanggal tidak ditemukan. Kolom ada: {list(df_raw.columns)}")
+        st.error(f"Kolom tidak ditemukan. Kolom ada: {list(df_raw.columns)}")
         return pd.DataFrame()
 
     st.info(f"📌 Kolom terdeteksi — Nama: `{col_nama}` | Waktu: `{col_waktu}`")
 
     df = df_raw[[col_nama, col_waktu]].copy()
     df.columns = ["Nama", "TglWaktu"]
+
+    # DEBUG
+    st.write("**Tipe data kolom TglWaktu:**", str(df["TglWaktu"].dtype))
+    st.write("**5 nilai pertama:**", df["TglWaktu"].head(5).tolist())
+
     df["TglWaktu"] = df["TglWaktu"].apply(parse_datetime)
+
+    gagal = df["TglWaktu"].isna().sum()
+    if gagal > 0:
+        st.warning(f"⚠️ {gagal} baris gagal di-parse. Contoh:")
+        st.write(df[df["TglWaktu"].isna()]["TglWaktu"].head(5).tolist())
+
     df = df.dropna(subset=["TglWaktu"])
+    st.success(f"✅ {len(df)} baris berhasil di-parse")
+
+    if df.empty:
+        st.error("Tidak ada data valid.")
+        return pd.DataFrame()
 
     df["Tanggal"] = df["TglWaktu"].dt.date
     df["Jam"] = df["TglWaktu"].dt.time
@@ -103,12 +138,9 @@ def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
             if df_hari.empty:
                 status = "Libur" if hari in HARI_LIBUR else "Tidak Ada Absen"
                 hasil.append({
-                    "Nama": nama,
-                    "Tanggal": tanggal.strftime("%d/%m/%Y"),
-                    "Jam Masuk": "",
-                    "Jam Pulang": "",
-                    "Status": status,
-                    "Menit Terlambat": 0,
+                    "Nama": nama, "Tanggal": tanggal.strftime("%d/%m/%Y"),
+                    "Jam Masuk": "", "Jam Pulang": "",
+                    "Status": status, "Menit Terlambat": 0,
                 })
                 continue
 
@@ -127,38 +159,27 @@ def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
                     break
 
             if hari in HARI_LIBUR:
-                status = "Libur"
-                menit_terlambat = 0
+                status, menit_terlambat = "Libur", 0
             elif jam_masuk is None and jam_pulang is None:
-                status = "Tidak Ada Absen"
-                menit_terlambat = 0
+                status, menit_terlambat = "Tidak Ada Absen", 0
             elif jam_masuk is not None and jam_pulang is None:
                 if jam_masuk >= JAM_MASUK_NORMAL:
-                    status = "Terlambat"
-                    menit_terlambat = hitung_menit_terlambat(jam_masuk)
+                    status, menit_terlambat = "Terlambat", hitung_menit_terlambat(jam_masuk)
                 else:
-                    status = "Hanya Absen Masuk"
-                    menit_terlambat = 0
+                    status, menit_terlambat = "Hanya Absen Masuk", 0
             elif jam_masuk is None and jam_pulang is not None:
-                status = "Hanya Absen Pulang"
-                menit_terlambat = 0
+                status, menit_terlambat = "Hanya Absen Pulang", 0
             elif hari == 5 and jam_pulang <= BATAS_HALFDAY:
-                status = "Half-day"
-                menit_terlambat = 0
+                status, menit_terlambat = "Half-day", 0
             elif jam_masuk >= JAM_MASUK_NORMAL:
-                status = "Terlambat"
-                menit_terlambat = hitung_menit_terlambat(jam_masuk)
+                status, menit_terlambat = "Terlambat", hitung_menit_terlambat(jam_masuk)
             else:
-                status = "Tepat Waktu"
-                menit_terlambat = 0
+                status, menit_terlambat = "Tepat Waktu", 0
 
             hasil.append({
-                "Nama": nama,
-                "Tanggal": tanggal.strftime("%d/%m/%Y"),
-                "Jam Masuk": jam_str(jam_masuk),
-                "Jam Pulang": jam_str(jam_pulang),
-                "Status": status,
-                "Menit Terlambat": menit_terlambat,
+                "Nama": nama, "Tanggal": tanggal.strftime("%d/%m/%Y"),
+                "Jam Masuk": jam_str(jam_masuk), "Jam Pulang": jam_str(jam_pulang),
+                "Status": status, "Menit Terlambat": menit_terlambat,
             })
 
     df_hasil = pd.DataFrame(hasil)
