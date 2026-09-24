@@ -11,9 +11,9 @@ st.caption("Upload Excel absensi → input rentang tanggal → otomatis jadi lap
 
 
 # === ATURAN ===
-JAM_MASUK_NORMAL = time(9, 0, 0)      # < 09:00:00 = tepat waktu; ≥ 09:00:00 = terlambat
+JAM_MASUK_NORMAL = time(9, 0, 0)      # ≥ 09:00:00 = terlambat
 BATAS_HALFDAY = time(13, 0)           # pulang ≤ 13:00 = half-day (khusus Sabtu)
-HARI_LIBUR = [6]                      # hanya Minggu (0=Senin, 6=Minggu)
+HARI_LIBUR = [6]                      # hanya Minggu
 
 
 def parse_datetime(s):
@@ -39,12 +39,7 @@ def jam_str(t):
 
 
 def hitung_menit_terlambat(jam_masuk):
-    """Terlambat dihitung dari 09:00:00. Masuk 09:00:00 = 0 menit? 
-    Karena aturannya 'jam 09.00 sudah dihitung terlambat', maka:
-    - masuk 08:59:59 = 0 menit (tepat)
-    - masuk 09:00:00 = 1 menit (terlambat, minimal 1)
-    - masuk 09:05:00 = 5 menit
-    """
+    """≥ 09:00:00 = terlambat. Minimal 1 menit."""
     if jam_masuk is None:
         return 0
     batas = datetime.combine(datetime.today(), JAM_MASUK_NORMAL)
@@ -52,7 +47,6 @@ def hitung_menit_terlambat(jam_masuk):
     selisih_detik = (masuk_dt - batas).total_seconds()
     if selisih_detik < 0:
         return 0
-    # Minimal 1 menit kalau sudah lewat/tepat 09:00:00
     menit = int(selisih_detik // 60)
     if selisih_detik > 0 and menit == 0:
         menit = 1
@@ -60,11 +54,10 @@ def hitung_menit_terlambat(jam_masuk):
 
 
 def cari_kolom(df, kandidat):
-    """Cari kolom yang mengandung salah satu kata kunci (case-insensitive)."""
-    for c in df.columns:
-        cl = str(c).lower().strip()
-        for k in kandidat:
-            if k in cl:
+    """Cari kolom dari daftar kandidat (prioritas urutan)."""
+    for k in kandidat:
+        for c in df.columns:
+            if k in str(c).lower().strip():
                 return c
     return None
 
@@ -72,13 +65,15 @@ def cari_kolom(df, kandidat):
 def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
     """Generate laporan lengkap: Nama × Tanggal dalam rentang."""
 
-    # Deteksi kolom secara fleksibel
+    # Deteksi kolom: coba tiap kandidat sesuai prioritas
     col_nama = cari_kolom(df_raw, ["name", "nama"])
-    col_waktu = cari_kolom(df_raw, ["date/time", "datetime", "tgl/waktu", "tanggal", "waktu", "date", "tgl"])
+    col_waktu = cari_kolom(df_raw, ["date/time", "datetime", "tgl/waktu", "tanggal", "waktu"])
 
     if col_nama is None or col_waktu is None:
-        st.error(f"Kolom 'Name'/'Nama' atau 'Date/Time'/'Tgl/Waktu' tidak ditemukan. Kolom ada: {list(df_raw.columns)}")
+        st.error(f"Kolom Nama/Tanggal tidak ditemukan. Kolom ada: {list(df_raw.columns)}")
         return pd.DataFrame()
+
+    st.info(f"📌 Kolom terdeteksi — Nama: `{col_nama}` | Waktu: `{col_waktu}`")
 
     df = df_raw[[col_nama, col_waktu]].copy()
     df.columns = ["Nama", "TglWaktu"]
@@ -91,7 +86,6 @@ def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
 
     semua_nama = sorted(df["Nama"].unique().tolist())
 
-    # Generate semua tanggal
     semua_tanggal = []
     tgl = tgl_mulai
     while tgl <= tgl_selesai:
@@ -106,7 +100,6 @@ def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
             df_hari = df_nama[df_nama["Tanggal"] == tanggal]
             hari = tanggal.weekday()
 
-            # Tidak ada scan
             if df_hari.empty:
                 status = "Libur" if hari in HARI_LIBUR else "Tidak Ada Absen"
                 hasil.append({
@@ -121,21 +114,18 @@ def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
 
             jam_list = sorted(df_hari["Jam"].tolist())
 
-            # Jam masuk = scan PERTAMA sebelum 12:00
             jam_masuk = None
             for j in jam_list:
                 if j < time(12, 0):
                     jam_masuk = j
                     break
 
-            # Jam pulang = scan PERTAMA setelah 12:00
             jam_pulang = None
             for j in jam_list:
                 if j >= time(12, 0):
                     jam_pulang = j
                     break
 
-            # Status
             if hari in HARI_LIBUR:
                 status = "Libur"
                 menit_terlambat = 0
@@ -152,7 +142,7 @@ def konversi_absensi(df_raw, tgl_mulai, tgl_selesai):
             elif jam_masuk is None and jam_pulang is not None:
                 status = "Hanya Absen Pulang"
                 menit_terlambat = 0
-            elif hari == 5 and jam_pulang <= BATAS_HALFDAY:  # Sabtu
+            elif hari == 5 and jam_pulang <= BATAS_HALFDAY:
                 status = "Half-day"
                 menit_terlambat = 0
             elif jam_masuk >= JAM_MASUK_NORMAL:
@@ -211,7 +201,6 @@ def tulis_df(writer, df, sheet, startrow=0, kolom_angka=None):
 uploaded = st.file_uploader("Upload file Excel absensi (.xls / .xlsx)", type=["xls", "xlsx"])
 
 if uploaded:
-    # Baca file multi-engine
     df_raw = None
     errors = []
 
